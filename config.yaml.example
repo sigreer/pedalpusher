@@ -1,0 +1,26 @@
+# PedalPusher Configuration
+# Copy to ~/.config/footpedal/config.yaml
+#
+# Key codes: KEY_A=30, KEY_B=48, KEY_C=46
+# Find others with: sudo evtest
+
+mappings:
+  pedal_a:
+    key_code: 30        # KEY_A (left pedal)
+    script: pedal_a.sh  # Script in scripts_dir
+    on: press           # press, release, or both
+    passthrough: false  # true to also send original key
+
+  pedal_b:
+    key_code: 48        # KEY_B (middle pedal)
+    script: pedal_b.sh
+    on: press
+    passthrough: false
+
+  pedal_c:
+    key_code: 46        # KEY_C (right pedal)
+    script: pedal_c.sh
+    on: press
+    passthrough: false
+
+scripts_dir: ~/.config/footpedal/scripts
