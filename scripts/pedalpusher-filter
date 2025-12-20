@@ -32,41 +32,51 @@ KEY_CODES = {
 }
 
 
-def get_user():
-    """Get the real user (not root when running under sudo)."""
-    user = os.environ.get('SUDO_USER') or os.environ.get('USER')
-    if os.getuid() == 0:
-        try:
-            result = subprocess.run(
-                ['loginctl', 'list-users', '--no-legend'],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[1] != 'root':
-                        user = parts[1]
-                        break
-        except Exception:
-            pass
-    return user if user and user != 'root' else None
-
-
-def get_config_path(user):
-    """Get config directory, preferring pedalpusher over footpedal."""
-    if user:
-        home = Path(f'/home/{user}')
-    else:
-        home = Path.home()
-
-    # Check new location first, then legacy
-    for name in ['pedalpusher', 'footpedal']:
-        path = home / '.config' / name
-        if (path / 'config.yaml').exists():
-            return path
-
-    # Default to new location
-    return home / '.config' / 'pedalpusher'
+def find_config_and_user():
+    """Find config directory and determine user. Returns (config_path, user)."""
+    # Try multiple methods to find the config and user
+    
+    # Method 1: Check SUDO_USER
+    user = os.environ.get('SUDO_USER')
+    if user and user != 'root':
+        for name in ['pedalpusher', 'footpedal']:
+            path = Path(f'/home/{user}/.config/{name}')
+            if (path / 'config.yaml').exists():
+                return path, user
+    
+    # Method 2: Use loginctl to find logged-in users
+    try:
+        result = subprocess.run(
+            ['loginctl', 'list-users', '--no-legend'],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.strip().split('\n'):
+            if line.strip():
+                parts = line.split()
+                if len(parts) >= 2:
+                    user = parts[1]
+                    if user != 'root':
+                        for name in ['pedalpusher', 'footpedal']:
+                            path = Path(f'/home/{user}/.config/{name}')
+                            if (path / 'config.yaml').exists():
+                                return path, user
+    except Exception:
+        pass
+    
+    # Method 3: Scan /home for config directories
+    try:
+        for home_dir in Path('/home').iterdir():
+            if home_dir.is_dir():
+                user = home_dir.name
+                for name in ['pedalpusher', 'footpedal']:
+                    path = home_dir / '.config' / name
+                    if (path / 'config.yaml').exists():
+                        return path, user
+    except Exception:
+        pass
+    
+    # Fallback
+    return Path.home() / '.config' / 'pedalpusher', None
 
 
 def load_config(config_dir):
@@ -139,11 +149,15 @@ def run_script(script_path, user=None, event_type="unknown", config_dir=None):
 
 
 def main():
-    user = get_user()
-    config_dir = get_config_path(user)
+    config_dir, user = find_config_and_user()
     config = load_config(config_dir)
 
-    scripts_dir = Path(os.path.expanduser(config['scripts_dir']))
+    # Expand ~ in scripts_dir
+    scripts_dir_str = config['scripts_dir']
+    if scripts_dir_str.startswith('~') and user:
+        scripts_dir_str = scripts_dir_str.replace('~', f'/home/{user}', 1)
+    scripts_dir = Path(scripts_dir_str)
+
     global_debounce = float(config.get('debounce', 0))
     debug = config.get('debug', False)
 
@@ -155,7 +169,8 @@ def main():
             key_mappings[key_code] = mapping
             key_mappings[key_code]['_name'] = name
 
-    sys.stderr.write(f"pedalpusher: Config from {config_dir}\n")
+    sys.stderr.write(f"pedalpusher: Config from {config_dir} (user={user})\n")
+    sys.stderr.write(f"pedalpusher: Scripts dir: {scripts_dir}\n")
     sys.stderr.write(f"pedalpusher: Mappings: {[(k, m.get('on'), m.get('remap_to')) for k,m in key_mappings.items()]}\n")
     sys.stderr.write(f"pedalpusher: Debounce: {global_debounce}s, debug: {debug}\n")
 
