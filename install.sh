@@ -115,6 +115,16 @@ install_programs() {
             -o /usr/local/bin/pedalpusher-configure
     fi
     sudo chmod +x /usr/local/bin/pedalpusher-configure
+
+    info "Installing pedalpusher to /usr/local/bin..."
+
+    if [ -f "$SCRIPT_DIR/scripts/pedalpusher" ]; then
+        sudo cp "$SCRIPT_DIR/scripts/pedalpusher" /usr/local/bin/
+    else
+        sudo curl -fsSL https://raw.githubusercontent.com/sigreer/pedalpusher/main/scripts/pedalpusher \
+            -o /usr/local/bin/pedalpusher
+    fi
+    sudo chmod +x /usr/local/bin/pedalpusher
 }
 
 # ------------------------------------------------------------------------------
@@ -226,7 +236,8 @@ install_udevmon_config() {
     sudo mkdir -p /etc/interception
     sudo tee /etc/interception/udevmon.yaml > /dev/null << UDEVMON_EOF
 # PedalPusher - Foot pedal interception config
-- JOB: intercept -g \$DEVNODE | /usr/local/bin/pedalpusher-filter | uinput -d \$DEVNODE
+# The --user flag ensures the filter uses the correct user's config and runs scripts as that user
+- JOB: intercept -g \$DEVNODE | /usr/local/bin/pedalpusher-filter --user $REAL_USER | uinput -d \$DEVNODE
   DEVICE:
     LINK: $device_link
 UDEVMON_EOF
@@ -299,9 +310,11 @@ main() {
     echo "  Log file:     $STATE_DIR/pedalpusher.log"
     echo ""
     echo "  Commands:"
+    echo "    sudo pedalpusher reload         # Reload config (no restart needed)"
+    echo "    pedalpusher status              # Show filter status"
+    echo "    pedalpusher log                 # Tail logs"
     echo "    sudo pedalpusher-configure      # Program hardware"
     echo "    sudo pedalpusher-configure -r   # Read hardware config"
-    echo "    sudo systemctl restart udevmon  # Restart after config changes"
     echo ""
 }
 

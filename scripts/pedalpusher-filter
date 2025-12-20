@@ -2,9 +2,21 @@
 """
 PedalPusher filter for interception-tools.
 Maps foot pedal key events to scripts and remapped keys.
+
+Usage:
+    pedalpusher-filter [--user USER] [--config PATH]
+
+Options:
+    --user USER     Run scripts as USER and use their config
+    --config PATH   Use config directory at PATH (overrides --user for config)
+
+Signals:
+    SIGHUP          Reload configuration without restart
 """
 
+import argparse
 import os
+import signal
 import sys
 import struct
 import subprocess
@@ -20,31 +32,110 @@ KEY_RELEASE = 0
 KEY_PRESS = 1
 KEY_REPEAT = 2
 
-# Common key codes for remapping
+# Key codes for remapping (Linux input event codes)
+# Full list: /usr/include/linux/input-event-codes.h
 KEY_CODES = {
-    'KEY_ENTER': 28, 'ENTER': 28,
-    'KEY_F13': 183, 'F13': 183,
-    'KEY_F14': 184, 'F14': 184,
-    'KEY_F15': 185, 'F15': 185,
-    'KEY_A': 30, 'A': 30,
-    'KEY_B': 48, 'B': 48,
-    'KEY_C': 46, 'C': 46,
+    # Function keys
+    'F1': 59, 'F2': 60, 'F3': 61, 'F4': 62, 'F5': 63, 'F6': 64,
+    'F7': 65, 'F8': 66, 'F9': 67, 'F10': 68, 'F11': 87, 'F12': 88,
+    'F13': 183, 'F14': 184, 'F15': 185, 'F16': 186,
+    'F17': 187, 'F18': 188, 'F19': 189, 'F20': 190,
+    'F21': 191, 'F22': 192, 'F23': 193, 'F24': 194,
+    # Letters
+    'A': 30, 'B': 48, 'C': 46, 'D': 32, 'E': 18, 'F': 33,
+    'G': 34, 'H': 35, 'I': 23, 'J': 36, 'K': 37, 'L': 38,
+    'M': 50, 'N': 49, 'O': 24, 'P': 25, 'Q': 16, 'R': 19,
+    'S': 31, 'T': 20, 'U': 22, 'V': 47, 'W': 17, 'X': 45,
+    'Y': 21, 'Z': 44,
+    # Numbers
+    '1': 2, '2': 3, '3': 4, '4': 5, '5': 6,
+    '6': 7, '7': 8, '8': 9, '9': 10, '0': 11,
+    # Special keys
+    'ENTER': 28, 'RETURN': 28,
+    'ESCAPE': 1, 'ESC': 1,
+    'TAB': 15,
+    'SPACE': 57,
+    'BACKSPACE': 14,
+    'DELETE': 111,
+    'INSERT': 110,
+    'HOME': 102,
+    'END': 107,
+    'PAGEUP': 104, 'PAGE_UP': 104,
+    'PAGEDOWN': 109, 'PAGE_DOWN': 109,
+    'UP': 103, 'DOWN': 108, 'LEFT': 105, 'RIGHT': 106,
+    'PAUSE': 119,
+    'SCROLLLOCK': 70, 'SCROLL_LOCK': 70,
+    'PRINTSCREEN': 99, 'PRINT_SCREEN': 99, 'SYSRQ': 99,
+    # Modifiers
+    'LEFT_CTRL': 29, 'LEFTCTRL': 29,
+    'RIGHT_CTRL': 97, 'RIGHTCTRL': 97,
+    'LEFT_SHIFT': 42, 'LEFTSHIFT': 42,
+    'RIGHT_SHIFT': 54, 'RIGHTSHIFT': 54,
+    'LEFT_ALT': 56, 'LEFTALT': 56,
+    'RIGHT_ALT': 100, 'RIGHTALT': 100,
+    'LEFT_META': 125, 'LEFTMETA': 125,
+    'RIGHT_META': 126, 'RIGHTMETA': 126,
+    # Media keys
+    'MUTE': 113,
+    'VOLUMEUP': 115, 'VOLUME_UP': 115,
+    'VOLUMEDOWN': 114, 'VOLUME_DOWN': 114,
+    'PLAYPAUSE': 164, 'PLAY_PAUSE': 164,
+    'NEXTSONG': 163, 'NEXT_SONG': 163,
+    'PREVIOUSSONG': 165, 'PREVIOUS_SONG': 165,
+    'STOPCD': 166, 'STOP': 166,
 }
 
+# Add KEY_ prefixed versions
+KEY_CODES.update({f'KEY_{k}': v for k, v in list(KEY_CODES.items())})
 
-def find_config_and_user():
+# Global state for SIGHUP reload
+reload_requested = False
+
+
+def handle_sighup(signum, frame):
+    """Handle SIGHUP for config reload."""
+    global reload_requested
+    reload_requested = True
+    sys.stderr.write("pedalpusher: SIGHUP received, will reload config\n")
+
+
+def find_config_and_user(args_user=None, args_config=None):
     """Find config directory and determine user. Returns (config_path, user)."""
-    # Try multiple methods to find the config and user
-    
-    # Method 1: Check SUDO_USER
-    user = os.environ.get('SUDO_USER')
-    if user and user != 'root':
+
+    # Priority 1: Explicit --config path
+    if args_config:
+        config_dir = Path(args_config)
+        user = args_user  # May be None, that's OK
+        if (config_dir / 'config.yaml').exists():
+            return config_dir, user
+        sys.stderr.write(f"pedalpusher: Warning: --config path has no config.yaml: {config_dir}\n")
+
+    # Priority 2: Explicit --user
+    if args_user:
         for name in ['pedalpusher', 'footpedal']:
-            path = Path(f'/home/{user}/.config/{name}')
+            path = Path(f'/home/{args_user}/.config/{name}')
             if (path / 'config.yaml').exists():
-                return path, user
-    
-    # Method 2: Use loginctl to find logged-in users
+                return path, args_user
+        # User specified but no config found - use default path
+        return Path(f'/home/{args_user}/.config/pedalpusher'), args_user
+
+    # Priority 3: PEDALPUSHER_USER environment variable
+    env_user = os.environ.get('PEDALPUSHER_USER')
+    if env_user and env_user != 'root':
+        for name in ['pedalpusher', 'footpedal']:
+            path = Path(f'/home/{env_user}/.config/{name}')
+            if (path / 'config.yaml').exists():
+                return path, env_user
+
+    # Priority 4: SUDO_USER (for manual testing)
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user and sudo_user != 'root':
+        for name in ['pedalpusher', 'footpedal']:
+            path = Path(f'/home/{sudo_user}/.config/{name}')
+            if (path / 'config.yaml').exists():
+                return path, sudo_user
+
+    # Priority 5: loginctl to find logged-in users
     try:
         result = subprocess.run(
             ['loginctl', 'list-users', '--no-legend'],
@@ -62,8 +153,8 @@ def find_config_and_user():
                                 return path, user
     except Exception:
         pass
-    
-    # Method 3: Scan /home for config directories
+
+    # Priority 6: Scan /home for config directories (last resort)
     try:
         for home_dir in Path('/home').iterdir():
             if home_dir.is_dir():
@@ -74,7 +165,7 @@ def find_config_and_user():
                         return path, user
     except Exception:
         pass
-    
+
     # Fallback
     return Path.home() / '.config' / 'pedalpusher', None
 
@@ -148,8 +239,9 @@ def run_script(script_path, user=None, event_type="unknown", config_dir=None):
         sys.stderr.write(f"pedalpusher: Error running script: {e}\n")
 
 
-def main():
-    config_dir, user = find_config_and_user()
+def build_config_state(args_user, args_config):
+    """Load config and build runtime state. Returns dict with all needed state."""
+    config_dir, user = find_config_and_user(args_user, args_config)
     config = load_config(config_dir)
 
     # Expand ~ in scripts_dir
@@ -161,22 +253,52 @@ def main():
     global_debounce = float(config.get('debounce', 0))
     debug = config.get('debug', False)
 
+    # Override user from config if specified
+    if config.get('user'):
+        user = config['user']
+
     # Build key mappings
     key_mappings = {}
     for name, mapping in config['mappings'].items():
         key_code = mapping.get('key_code')
         if key_code is not None:
-            key_mappings[key_code] = mapping
+            key_mappings[key_code] = dict(mapping)
             key_mappings[key_code]['_name'] = name
 
     sys.stderr.write(f"pedalpusher: Config from {config_dir} (user={user})\n")
     sys.stderr.write(f"pedalpusher: Scripts dir: {scripts_dir}\n")
     sys.stderr.write(f"pedalpusher: Mappings: {[(k, m.get('on'), m.get('remap_to')) for k,m in key_mappings.items()]}\n")
     sys.stderr.write(f"pedalpusher: Debounce: {global_debounce}s, debug: {debug}\n")
+    sys.stderr.write(f"pedalpusher: PID {os.getpid()} - send SIGHUP to reload config\n")
 
-    # Override user from config if specified
-    if config.get('user'):
-        user = config['user']
+    return {
+        'config_dir': config_dir,
+        'user': user,
+        'scripts_dir': scripts_dir,
+        'global_debounce': global_debounce,
+        'debug': debug,
+        'key_mappings': key_mappings,
+    }
+
+
+def main():
+    global reload_requested
+
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description='PedalPusher filter for interception-tools',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='Send SIGHUP to reload configuration without restart.'
+    )
+    parser.add_argument('--user', '-u', help='Run scripts as USER and use their config')
+    parser.add_argument('--config', '-c', help='Use config directory at PATH')
+    args = parser.parse_args()
+
+    # Set up SIGHUP handler for config reload
+    signal.signal(signal.SIGHUP, handle_sighup)
+
+    # Initial config load
+    state = build_config_state(args.user, args.config)
 
     pressed_keys = set()
     last_trigger_time = {}
@@ -185,6 +307,16 @@ def main():
     stdout = sys.stdout.buffer
 
     while True:
+        # Check for reload request
+        if reload_requested:
+            reload_requested = False
+            sys.stderr.write("pedalpusher: Reloading configuration...\n")
+            try:
+                state = build_config_state(args.user, args.config)
+                sys.stderr.write("pedalpusher: Configuration reloaded successfully\n")
+            except Exception as e:
+                sys.stderr.write(f"pedalpusher: Failed to reload config: {e}\n")
+
         data = stdin.read(EVENT_SIZE)
         if not data or len(data) < EVENT_SIZE:
             break
@@ -192,18 +324,18 @@ def main():
         tv_sec, tv_usec, ev_type, ev_code, ev_value = struct.unpack(EVENT_FORMAT, data)
 
         # Debug logging
-        if debug and ev_type == EV_KEY:
+        if state['debug'] and ev_type == EV_KEY:
             val_name = {0: 'release', 1: 'press', 2: 'repeat'}.get(ev_value, str(ev_value))
             sys.stderr.write(f"pedalpusher: DEBUG key={ev_code} {val_name}\n")
 
         should_passthrough = True
         output_data = data
 
-        if ev_type == EV_KEY and ev_code in key_mappings:
-            mapping = key_mappings[ev_code]
+        if ev_type == EV_KEY and ev_code in state['key_mappings']:
+            mapping = state['key_mappings'][ev_code]
             mapping_name = mapping.get('_name', 'unknown')
             trigger_on = mapping.get('on', 'press')
-            debounce = float(mapping.get('debounce', global_debounce))
+            debounce = float(mapping.get('debounce', state['global_debounce']))
 
             trigger = False
             event_type = "unknown"
@@ -246,9 +378,9 @@ def main():
             if trigger:
                 script_name = mapping.get('script', '')
                 if script_name:
-                    script_path = scripts_dir / script_name
+                    script_path = state['scripts_dir'] / script_name
                     sys.stderr.write(f"pedalpusher: [{mapping_name}] {event_type} -> {script_name}\n")
-                    run_script(str(script_path), user, event_type, config_dir)
+                    run_script(str(script_path), state['user'], event_type, state['config_dir'])
 
             should_passthrough = mapping.get('passthrough', False)
 
