@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""
+pedalpusher-configure - Program PCsensor foot switch hardware from config.
+
+Reads ~/.config/pedalpusher/config.yaml and programs the foot switch
+to send the specified keys for each pedal.
+
+Usage:
+    pedalpusher-configure           # Program from config
+    pedalpusher-configure --read    # Read current hardware config
+    pedalpusher-configure --check   # Check if hardware matches config
+"""
+
+import os
+import subprocess
+import sys
+import yaml
+from pathlib import Path
+
+# Key name to footswitch key name mapping
+# footswitch uses lowercase key names
+KEY_NAMES = {
+    # Function keys
+    'F1': 'f1', 'F2': 'f2', 'F3': 'f3', 'F4': 'f4',
+    'F5': 'f5', 'F6': 'f6', 'F7': 'f7', 'F8': 'f8',
+    'F9': 'f9', 'F10': 'f10', 'F11': 'f11', 'F12': 'f12',
+    'F13': 'f13', 'F14': 'f14', 'F15': 'f15', 'F16': 'f16',
+    'F17': 'f17', 'F18': 'f18', 'F19': 'f19', 'F20': 'f20',
+    'F21': 'f21', 'F22': 'f22', 'F23': 'f23', 'F24': 'f24',
+    # Letters
+    'A': 'a', 'B': 'b', 'C': 'c', 'D': 'd', 'E': 'e',
+    'F': 'f', 'G': 'g', 'H': 'h', 'I': 'i', 'J': 'j',
+    'K': 'k', 'L': 'l', 'M': 'm', 'N': 'n', 'O': 'o',
+    'P': 'p', 'Q': 'q', 'R': 'r', 'S': 's', 'T': 't',
+    'U': 'u', 'V': 'v', 'W': 'w', 'X': 'x', 'Y': 'y', 'Z': 'z',
+    # Special keys
+    'ENTER': 'enter', 'RETURN': 'enter',
+    'ESCAPE': 'escape', 'ESC': 'escape',
+    'TAB': 'tab',
+    'SPACE': 'space',
+    'BACKSPACE': 'backspace',
+    'DELETE': 'delete',
+    'INSERT': 'insert',
+    'HOME': 'home',
+    'END': 'end',
+    'PAGEUP': 'pageup', 'PAGE_UP': 'pageup',
+    'PAGEDOWN': 'pagedown', 'PAGE_DOWN': 'pagedown',
+    'UP': 'up', 'DOWN': 'down', 'LEFT': 'left', 'RIGHT': 'right',
+    'PAUSE': 'pause',
+    'SCROLLLOCK': 'scroll_lock',
+    'PRINTSCREEN': 'print_screen',
+    # Media keys
+    'MUTE': 'mute',
+    'VOLUMEUP': 'vol_up', 'VOLUME_UP': 'vol_up',
+    'VOLUMEDOWN': 'vol_down', 'VOLUME_DOWN': 'vol_down',
+    'PLAYPAUSE': 'play_pause', 'PLAY_PAUSE': 'play_pause',
+    'NEXTSONG': 'next_song', 'NEXT_SONG': 'next_song',
+    'PREVIOUSSONG': 'prev_song', 'PREVIOUS_SONG': 'prev_song',
+    'STOPCD': 'stop', 'STOP': 'stop',
+}
+
+# Key code to key name mapping (Linux input event codes)
+KEY_CODES = {
+    28: 'ENTER',
+    30: 'A', 46: 'C', 48: 'B',
+    59: 'F1', 60: 'F2', 61: 'F3', 62: 'F4', 63: 'F5', 64: 'F6',
+    65: 'F7', 66: 'F8', 67: 'F9', 68: 'F10', 87: 'F11', 88: 'F12',
+    183: 'F13', 184: 'F14', 185: 'F15', 186: 'F16',
+    187: 'F17', 188: 'F18', 189: 'F19', 190: 'F20',
+    191: 'F21', 192: 'F22', 193: 'F23', 194: 'F24',
+}
+
+# Reverse mapping
+KEY_NAME_TO_CODE = {v: k for k, v in KEY_CODES.items()}
+
+
+def get_config_path():
+    """Get the config file path."""
+    # Determine home directory (handle sudo)
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        home = Path(f'/home/{sudo_user}')
+    else:
+        home = Path.home()
+
+    # Check new location first, then legacy
+    for path in [
+        home / '.config' / 'pedalpusher' / 'config.yaml',
+        home / '.config' / 'footpedal' / 'config.yaml',
+    ]:
+        if path.exists():
+            return path
+    return home / '.config' / 'pedalpusher' / 'config.yaml'
+
+
+def load_config():
+    """Load configuration from YAML file."""
+    config_path = get_config_path()
+    if not config_path.exists():
+        print(f"Error: Config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def read_hardware():
+    """Read current hardware configuration."""
+    try:
+        result = subprocess.run(
+            ['footswitch', '-r'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            print(f"Error reading footswitch: {result.stderr}", file=sys.stderr)
+            return None
+
+        config = {}
+        for line in result.stdout.strip().split('\n'):
+            # Parse "[switch N]: key" format
+            if line.startswith('[switch '):
+                parts = line.split(']: ')
+                if len(parts) == 2:
+                    switch_num = int(parts[0].replace('[switch ', ''))
+                    key = parts[1].strip()
+                    config[switch_num] = key
+        return config
+    except FileNotFoundError:
+        print("Error: 'footswitch' command not found. Install footswitch-git.", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        print("Error: footswitch command timed out", file=sys.stderr)
+        sys.exit(1)
+
+
+def program_switch(switch_num, key_name):
+    """Program a single switch to send a key. (Legacy - use program_all_switches instead)"""
+    # Normalize key name for footswitch
+    fs_key = KEY_NAMES.get(key_name.upper(), key_name.lower())
+
+    try:
+        result = subprocess.run(
+            ['footswitch', f'-{switch_num}', '-k', fs_key],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            print(f"Error programming switch {switch_num}: {result.stderr}", file=sys.stderr)
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"Error: footswitch command timed out for switch {switch_num}", file=sys.stderr)
+        return False
+
+
+def program_all_switches(hardware_config):
+    """Program all switches in a single command (required for some footswitch models)."""
+    cmd = ['footswitch']
+
+    for switch_num in [1, 2, 3]:
+        switch_key = f'switch_{switch_num}'
+        if switch_key in hardware_config:
+            key_name = hardware_config[switch_key]
+            fs_key = KEY_NAMES.get(key_name.upper(), key_name.lower())
+            cmd.extend([f'-{switch_num}', '-k', fs_key])
+
+    if len(cmd) == 1:
+        print("No switches to program.", file=sys.stderr)
+        return False
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            print(f"Error programming switches: {result.stderr}", file=sys.stderr)
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        print("Error: footswitch command timed out", file=sys.stderr)
+        return False
+
+
+def main():
+    args = sys.argv[1:]
+
+    if '--help' in args or '-h' in args:
+        print(__doc__)
+        sys.exit(0)
+
+    if '--read' in args:
+        # Just read and display current config
+        hw_config = read_hardware()
+        if hw_config:
+            print("Current hardware configuration:")
+            for switch, key in sorted(hw_config.items()):
+                print(f"  Switch {switch}: {key}")
+        sys.exit(0)
+
+    # Load config
+    config = load_config()
+    hardware = config.get('hardware', {})
+
+    if not hardware:
+        print("No 'hardware' section in config. Nothing to program.", file=sys.stderr)
+        print("Add a hardware section like:", file=sys.stderr)
+        print("  hardware:", file=sys.stderr)
+        print("    switch_1: F13", file=sys.stderr)
+        print("    switch_2: F14", file=sys.stderr)
+        print("    switch_3: F15", file=sys.stderr)
+        sys.exit(1)
+
+    if '--check' in args:
+        # Check if hardware matches config
+        hw_config = read_hardware()
+        if not hw_config:
+            sys.exit(1)
+
+        all_match = True
+        for switch_key, desired_key in hardware.items():
+            switch_num = int(switch_key.replace('switch_', ''))
+            current = hw_config.get(switch_num, 'unconfigured')
+            expected = KEY_NAMES.get(desired_key.upper(), desired_key.lower())
+
+            if current.lower() != expected.lower():
+                print(f"Mismatch: Switch {switch_num} is '{current}', should be '{expected}'")
+                all_match = False
+            else:
+                print(f"OK: Switch {switch_num} = {current}")
+
+        sys.exit(0 if all_match else 1)
+
+    # Program hardware (must program all switches in single command for some models)
+    print("Programming foot switch hardware...")
+    current = read_hardware()
+
+    # Check what needs updating
+    needs_update = False
+    for switch_key, desired_key in hardware.items():
+        switch_num = int(switch_key.replace('switch_', ''))
+        current_key = current.get(switch_num, 'unconfigured') if current else 'unknown'
+        expected = KEY_NAMES.get(desired_key.upper(), desired_key.lower())
+
+        if current_key.lower() == expected.lower():
+            print(f"  Switch {switch_num}: already {desired_key}")
+        else:
+            print(f"  Switch {switch_num}: {current_key} -> {desired_key}")
+            needs_update = True
+
+    if not needs_update:
+        print("All switches already configured correctly.")
+        sys.exit(0)
+
+    # Program all switches in a single command (required for PCsensor devices)
+    print("Applying configuration...")
+    if program_all_switches(hardware):
+        # Verify
+        new_config = read_hardware()
+        all_ok = True
+        for switch_key, desired_key in hardware.items():
+            switch_num = int(switch_key.replace('switch_', ''))
+            actual = new_config.get(switch_num, 'unconfigured') if new_config else 'unknown'
+            expected = KEY_NAMES.get(desired_key.upper(), desired_key.lower())
+            if actual.lower() != expected.lower():
+                print(f"  ERROR: Switch {switch_num} is '{actual}', expected '{expected}'")
+                all_ok = False
+        if all_ok:
+            print("Hardware programming complete.")
+        else:
+            print("Some switches failed to program.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("Failed to program hardware.", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

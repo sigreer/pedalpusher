@@ -23,6 +23,9 @@ info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Detect the actual user (not root when using sudo)
 if [ -n "$SUDO_USER" ]; then
     REAL_USER="$SUDO_USER"
@@ -32,8 +35,8 @@ else
     REAL_HOME="$HOME"
 fi
 
-CONFIG_DIR="$REAL_HOME/.config/footpedal"
-STATE_DIR="$REAL_HOME/.local/state/footpedal"
+CONFIG_DIR="$REAL_HOME/.config/pedalpusher"
+STATE_DIR="$REAL_HOME/.local/state/pedalpusher"
 SCRIPTS_DIR="$CONFIG_DIR/scripts"
 
 # ------------------------------------------------------------------------------
@@ -52,6 +55,12 @@ install_dependencies() {
         if [ ${#pkgs[@]} -gt 0 ]; then
             info "Installing packages: ${pkgs[*]}"
             sudo pacman -S --noconfirm "${pkgs[@]}"
+        fi
+
+        # Check for footswitch tool (AUR)
+        if ! command -v footswitch &>/dev/null; then
+            warn "footswitch tool not found. Install from AUR for hardware programming:"
+            warn "  yay -S footswitch-git"
         fi
     elif command -v apt-get &> /dev/null; then
         # Debian/Ubuntu
@@ -82,148 +91,30 @@ install_dependencies() {
 }
 
 # ------------------------------------------------------------------------------
-# Create Filter Program
+# Install Programs
 # ------------------------------------------------------------------------------
 
-install_filter() {
-    info "Installing footpedal-filter to /usr/local/bin..."
+install_programs() {
+    info "Installing pedalpusher-filter to /usr/local/bin..."
 
-    sudo tee /usr/local/bin/footpedal-filter > /dev/null << 'FILTER_EOF'
-#!/usr/bin/env python3
-"""
-Foot pedal filter for intercept-tools.
-Reads input events, triggers user scripts for mapped keys, and passes through others.
-"""
+    if [ -f "$SCRIPT_DIR/scripts/pedalpusher-filter" ]; then
+        sudo cp "$SCRIPT_DIR/scripts/pedalpusher-filter" /usr/local/bin/
+    else
+        # Download from repo if not running from clone
+        sudo curl -fsSL https://raw.githubusercontent.com/sigreer/pedalpusher/main/scripts/pedalpusher-filter \
+            -o /usr/local/bin/pedalpusher-filter
+    fi
+    sudo chmod +x /usr/local/bin/pedalpusher-filter
 
-import os
-import sys
-import struct
-import subprocess
-import yaml
-from pathlib import Path
+    info "Installing pedalpusher-configure to /usr/local/bin..."
 
-EVENT_SIZE = 24
-EVENT_FORMAT = 'llHHi'
-EV_KEY = 1
-KEY_RELEASE, KEY_PRESS, KEY_REPEAT = 0, 1, 2
-
-def get_user_config_path():
-    user = os.environ.get('SUDO_USER') or os.environ.get('USER')
-    if os.getuid() == 0:
-        try:
-            result = subprocess.run(
-                ['loginctl', 'list-users', '--no-legend'],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        user = parts[1]
-                        break
-        except Exception:
-            pass
-    if user and user != 'root':
-        return Path(f'/home/{user}/.config/footpedal')
-    return Path.home() / '.config' / 'footpedal'
-
-def load_config():
-    config_dir = get_user_config_path()
-    config_file = config_dir / 'config.yaml'
-    default_config = {
-        'mappings': {
-            'pedal_a': {'key_code': 30, 'script': 'pedal_a.sh', 'on': 'press', 'passthrough': False},
-            'pedal_b': {'key_code': 48, 'script': 'pedal_b.sh', 'on': 'press', 'passthrough': False},
-            'pedal_c': {'key_code': 46, 'script': 'pedal_c.sh', 'on': 'press', 'passthrough': False},
-        },
-        'scripts_dir': str(config_dir / 'scripts'),
-        'user': None,
-    }
-    if config_file.exists():
-        try:
-            with open(config_file) as f:
-                user_config = yaml.safe_load(f) or {}
-                for key, value in user_config.items():
-                    if key == 'mappings' and isinstance(value, dict):
-                        default_config['mappings'].update(value)
-                    else:
-                        default_config[key] = value
-        except Exception as e:
-            sys.stderr.write(f"footpedal-filter: Error loading config: {e}\n")
-    return default_config
-
-def run_script(script_path, user=None):
-    if not os.path.exists(script_path):
-        sys.stderr.write(f"footpedal-filter: Script not found: {script_path}\n")
-        return
-    try:
-        env = os.environ.copy()
-        if user:
-            env['HOME'] = f'/home/{user}'
-            env['USER'] = user
-            env['LOGNAME'] = user
-            try:
-                with open(f'/home/{user}/.config/footpedal/env', 'r') as f:
-                    for line in f:
-                        if '=' in line:
-                            k, v = line.strip().split('=', 1)
-                            env[k] = v
-            except FileNotFoundError:
-                pass
-        if os.getuid() == 0 and user and user != 'root':
-            cmd = ['sudo', '-u', user, '-E', script_path]
-        else:
-            cmd = [script_path]
-        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL, start_new_session=True)
-    except Exception as e:
-        sys.stderr.write(f"footpedal-filter: Error running script: {e}\n")
-
-def main():
-    config = load_config()
-    scripts_dir = Path(config['scripts_dir'])
-    key_mappings = {}
-    for name, mapping in config['mappings'].items():
-        key_code = mapping.get('key_code')
-        if key_code is not None:
-            key_mappings[key_code] = mapping
-    user = config.get('user')
-    if not user:
-        config_dir = get_user_config_path()
-        parts = config_dir.parts
-        if len(parts) >= 3 and parts[1] == 'home':
-            user = parts[2]
-    stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
-    while True:
-        data = stdin.read(EVENT_SIZE)
-        if not data or len(data) < EVENT_SIZE:
-            break
-        tv_sec, tv_usec, ev_type, ev_code, ev_value = struct.unpack(EVENT_FORMAT, data)
-        should_passthrough = True
-        if ev_type == EV_KEY and ev_code in key_mappings:
-            mapping = key_mappings[ev_code]
-            trigger_on = mapping.get('on', 'press')
-            trigger = False
-            if trigger_on == 'press' and ev_value == KEY_PRESS:
-                trigger = True
-            elif trigger_on == 'release' and ev_value == KEY_RELEASE:
-                trigger = True
-            elif trigger_on == 'both' and ev_value in (KEY_PRESS, KEY_RELEASE):
-                trigger = True
-            if trigger:
-                script_name = mapping.get('script', '')
-                if script_name:
-                    run_script(str(scripts_dir / script_name), user)
-            should_passthrough = mapping.get('passthrough', False)
-        if should_passthrough:
-            stdout.write(data)
-            stdout.flush()
-
-if __name__ == '__main__':
-    main()
-FILTER_EOF
-
-    sudo chmod +x /usr/local/bin/footpedal-filter
+    if [ -f "$SCRIPT_DIR/scripts/pedalpusher-configure" ]; then
+        sudo cp "$SCRIPT_DIR/scripts/pedalpusher-configure" /usr/local/bin/
+    else
+        sudo curl -fsSL https://raw.githubusercontent.com/sigreer/pedalpusher/main/scripts/pedalpusher-configure \
+            -o /usr/local/bin/pedalpusher-configure
+    fi
+    sudo chmod +x /usr/local/bin/pedalpusher-configure
 }
 
 # ------------------------------------------------------------------------------
@@ -239,28 +130,40 @@ create_user_config() {
     if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
         cat > "$CONFIG_DIR/config.yaml" << 'CONFIG_EOF'
 # PedalPusher Configuration
-# Key codes: KEY_A=30, KEY_B=48, KEY_C=46
+# See: https://github.com/sigreer/pedalpusher
 
+# Hardware programming - what each physical switch sends
+# Run `sudo pedalpusher-configure` to apply these settings
+hardware:
+  switch_1: F13    # Left pedal
+  switch_2: F14    # Middle pedal
+  switch_3: F15    # Right pedal
+
+# Global settings
+debounce: 0        # Default debounce in seconds
+debug: false       # Log all key events
+
+# Mappings - how each key is handled
 mappings:
-  pedal_a:
-    key_code: 30        # KEY_A (left pedal)
+  pedal_left:
+    key_code: 183       # F13
     script: pedal_a.sh
-    on: press           # press, release, or both
-    passthrough: false  # true to also send original key
+    "on": press
+    passthrough: false
 
-  pedal_b:
-    key_code: 48        # KEY_B (middle pedal)
+  pedal_middle:
+    key_code: 184       # F14
     script: pedal_b.sh
-    on: press
+    "on": press
     passthrough: false
 
-  pedal_c:
-    key_code: 46        # KEY_C (right pedal)
+  pedal_right:
+    key_code: 185       # F15
     script: pedal_c.sh
-    on: press
+    "on": press
     passthrough: false
 
-scripts_dir: ~/.config/footpedal/scripts
+scripts_dir: ~/.config/pedalpusher/scripts
 CONFIG_EOF
     fi
 
@@ -279,7 +182,7 @@ ENV_EOF
 #!/bin/bash
 # Pedal ${pedal^^} script - customize this!
 
-echo "\$(date): Pedal ${pedal^^} pressed" >> ~/.local/state/footpedal/footpedal.log
+echo "\$(date): Pedal ${pedal^^} pressed" >> ~/.local/state/pedalpusher/pedalpusher.log
 
 # Examples:
 # notify-send "Pedal ${pedal^^}"
@@ -323,10 +226,28 @@ install_udevmon_config() {
     sudo mkdir -p /etc/interception
     sudo tee /etc/interception/udevmon.yaml > /dev/null << UDEVMON_EOF
 # PedalPusher - Foot pedal interception config
-- JOB: intercept -g \$DEVNODE | /usr/local/bin/footpedal-filter | uinput -d \$DEVNODE
+- JOB: intercept -g \$DEVNODE | /usr/local/bin/pedalpusher-filter | uinput -d \$DEVNODE
   DEVICE:
     LINK: $device_link
 UDEVMON_EOF
+}
+
+# ------------------------------------------------------------------------------
+# Program Hardware
+# ------------------------------------------------------------------------------
+
+program_hardware() {
+    if command -v footswitch &>/dev/null; then
+        info "Programming foot switch hardware..."
+        if sudo pedalpusher-configure 2>/dev/null; then
+            info "Hardware programmed successfully!"
+        else
+            warn "Could not program hardware. Run manually: sudo pedalpusher-configure"
+        fi
+    else
+        warn "footswitch tool not found - skipping hardware programming"
+        warn "Install footswitch and run: sudo pedalpusher-configure"
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -364,9 +285,10 @@ main() {
     fi
 
     install_dependencies
-    install_filter
+    install_programs
     create_user_config
     install_udevmon_config
+    program_hardware
     enable_service
 
     echo ""
@@ -374,9 +296,12 @@ main() {
     echo ""
     echo "  Your config:  $CONFIG_DIR/config.yaml"
     echo "  Your scripts: $SCRIPTS_DIR/"
-    echo "  Log file:     $STATE_DIR/footpedal.log"
+    echo "  Log file:     $STATE_DIR/pedalpusher.log"
     echo ""
-    echo "  Test with:    tail -f $STATE_DIR/footpedal.log"
+    echo "  Commands:"
+    echo "    sudo pedalpusher-configure      # Program hardware"
+    echo "    sudo pedalpusher-configure -r   # Read hardware config"
+    echo "    sudo systemctl restart udevmon  # Restart after config changes"
     echo ""
 }
 

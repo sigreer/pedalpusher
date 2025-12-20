@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+PedalPusher filter for interception-tools.
+Maps foot pedal key events to scripts and remapped keys.
+"""
+
+import os
+import sys
+import struct
+import subprocess
+import time
+import yaml
+from pathlib import Path
+
+EVENT_SIZE = 24
+EVENT_FORMAT = 'llHHi'
+
+EV_KEY = 1
+KEY_RELEASE = 0
+KEY_PRESS = 1
+KEY_REPEAT = 2
+
+# Common key codes for remapping
+KEY_CODES = {
+    'KEY_ENTER': 28, 'ENTER': 28,
+    'KEY_F13': 183, 'F13': 183,
+    'KEY_F14': 184, 'F14': 184,
+    'KEY_F15': 185, 'F15': 185,
+    'KEY_A': 30, 'A': 30,
+    'KEY_B': 48, 'B': 48,
+    'KEY_C': 46, 'C': 46,
+}
+
+
+def get_user():
+    """Get the real user (not root when running under sudo)."""
+    user = os.environ.get('SUDO_USER') or os.environ.get('USER')
+    if os.getuid() == 0:
+        try:
+            result = subprocess.run(
+                ['loginctl', 'list-users', '--no-legend'],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1] != 'root':
+                        user = parts[1]
+                        break
+        except Exception:
+            pass
+    return user if user and user != 'root' else None
+
+
+def get_config_path(user):
+    """Get config directory, preferring pedalpusher over footpedal."""
+    if user:
+        home = Path(f'/home/{user}')
+    else:
+        home = Path.home()
+
+    # Check new location first, then legacy
+    for name in ['pedalpusher', 'footpedal']:
+        path = home / '.config' / name
+        if (path / 'config.yaml').exists():
+            return path
+
+    # Default to new location
+    return home / '.config' / 'pedalpusher'
+
+
+def load_config(config_dir):
+    """Load configuration from YAML file."""
+    config_file = config_dir / 'config.yaml'
+    default_config = {
+        'mappings': {},
+        'scripts_dir': str(config_dir / 'scripts'),
+        'user': None,
+        'debounce': 0,
+        'debug': False,
+    }
+
+    if config_file.exists():
+        try:
+            with open(config_file) as f:
+                user_config = yaml.safe_load(f) or {}
+                for key, value in user_config.items():
+                    if key == 'mappings' and isinstance(value, dict):
+                        default_config['mappings'].update(value)
+                    else:
+                        default_config[key] = value
+        except Exception as e:
+            sys.stderr.write(f"pedalpusher: Error loading config: {e}\n")
+
+    return default_config
+
+
+def run_script(script_path, user=None, event_type="unknown", config_dir=None):
+    """Run a pedal script as the specified user."""
+    if not os.path.exists(script_path):
+        sys.stderr.write(f"pedalpusher: Script not found: {script_path}\n")
+        return
+
+    try:
+        env = os.environ.copy()
+        env['PEDAL_EVENT'] = event_type
+
+        if user:
+            env['HOME'] = f'/home/{user}'
+            env['USER'] = user
+            env['LOGNAME'] = user
+
+            # Load environment file for GUI apps
+            env_file = config_dir / 'env' if config_dir else None
+            if env_file and env_file.exists():
+                try:
+                    with open(env_file, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if '=' in line and not line.startswith('#'):
+                                k, v = line.split('=', 1)
+                                env[k] = v
+                except Exception:
+                    pass
+
+        if os.getuid() == 0 and user and user != 'root':
+            cmd = ['sudo', '-u', user, '-E', script_path]
+        else:
+            cmd = [script_path]
+
+        subprocess.Popen(
+            cmd, env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+    except Exception as e:
+        sys.stderr.write(f"pedalpusher: Error running script: {e}\n")
+
+
+def main():
+    user = get_user()
+    config_dir = get_config_path(user)
+    config = load_config(config_dir)
+
+    scripts_dir = Path(os.path.expanduser(config['scripts_dir']))
+    global_debounce = float(config.get('debounce', 0))
+    debug = config.get('debug', False)
+
+    # Build key mappings
+    key_mappings = {}
+    for name, mapping in config['mappings'].items():
+        key_code = mapping.get('key_code')
+        if key_code is not None:
+            key_mappings[key_code] = mapping
+            key_mappings[key_code]['_name'] = name
+
+    sys.stderr.write(f"pedalpusher: Config from {config_dir}\n")
+    sys.stderr.write(f"pedalpusher: Mappings: {[(k, m.get('on'), m.get('remap_to')) for k,m in key_mappings.items()]}\n")
+    sys.stderr.write(f"pedalpusher: Debounce: {global_debounce}s, debug: {debug}\n")
+
+    # Override user from config if specified
+    if config.get('user'):
+        user = config['user']
+
+    pressed_keys = set()
+    last_trigger_time = {}
+
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+
+    while True:
+        data = stdin.read(EVENT_SIZE)
+        if not data or len(data) < EVENT_SIZE:
+            break
+
+        tv_sec, tv_usec, ev_type, ev_code, ev_value = struct.unpack(EVENT_FORMAT, data)
+
+        # Debug logging
+        if debug and ev_type == EV_KEY:
+            val_name = {0: 'release', 1: 'press', 2: 'repeat'}.get(ev_value, str(ev_value))
+            sys.stderr.write(f"pedalpusher: DEBUG key={ev_code} {val_name}\n")
+
+        should_passthrough = True
+        output_data = data
+
+        if ev_type == EV_KEY and ev_code in key_mappings:
+            mapping = key_mappings[ev_code]
+            mapping_name = mapping.get('_name', 'unknown')
+            trigger_on = mapping.get('on', 'press')
+            debounce = float(mapping.get('debounce', global_debounce))
+
+            trigger = False
+            event_type = "unknown"
+
+            # Handle press/release/repeat
+            is_press = ev_value == KEY_PRESS or (ev_value == KEY_REPEAT and ev_code not in pressed_keys)
+            is_release = ev_value == KEY_RELEASE
+
+            if is_press:
+                pressed_keys.add(ev_code)
+            if is_release:
+                pressed_keys.discard(ev_code)
+
+            # Determine if we should trigger
+            if trigger_on == 'press' and is_press:
+                trigger = True
+                event_type = "press"
+            elif trigger_on == 'release' and is_release:
+                trigger = True
+                event_type = "release"
+            elif trigger_on == 'both':
+                if is_press:
+                    trigger = True
+                    event_type = "press"
+                elif is_release:
+                    trigger = True
+                    event_type = "release"
+
+            # Apply debounce
+            if trigger and debounce > 0:
+                now = time.time()
+                last_time = last_trigger_time.get(ev_code, 0)
+                if now - last_time < debounce:
+                    sys.stderr.write(f"pedalpusher: [{mapping_name}] Debounced {event_type}\n")
+                    trigger = False
+                else:
+                    last_trigger_time[ev_code] = now
+
+            # Run script if triggered
+            if trigger:
+                script_name = mapping.get('script', '')
+                if script_name:
+                    script_path = scripts_dir / script_name
+                    sys.stderr.write(f"pedalpusher: [{mapping_name}] {event_type} -> {script_name}\n")
+                    run_script(str(script_path), user, event_type, config_dir)
+
+            should_passthrough = mapping.get('passthrough', False)
+
+            # Handle key remapping
+            remap_to = mapping.get('remap_to')
+            if remap_to is not None and should_passthrough:
+                # Resolve key name to code if string
+                if isinstance(remap_to, str):
+                    remap_to = KEY_CODES.get(remap_to.upper(), KEY_CODES.get(remap_to, remap_to))
+                output_data = struct.pack(EVENT_FORMAT, tv_sec, tv_usec, ev_type, remap_to, ev_value)
+                if is_press or is_release:
+                    sys.stderr.write(f"pedalpusher: [{mapping_name}] remap {ev_code} -> {remap_to}\n")
+
+        if should_passthrough:
+            stdout.write(output_data)
+            stdout.flush()
+
+
+if __name__ == '__main__':
+    main()

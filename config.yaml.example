@@ -1,26 +1,57 @@
 # PedalPusher Configuration
-# Copy to ~/.config/footpedal/config.yaml
+# Copy to ~/.config/pedalpusher/config.yaml
 #
-# Key codes: KEY_A=30, KEY_B=48, KEY_C=46
-# Find others with: sudo evtest
+# Programs foot switch hardware and maps pedal events to actions.
+
+# Hardware programming - what each physical switch sends
+# Run `pedalpusher-configure` to apply these settings to the hardware.
+# Use unique keys (F13-F24) to avoid conflicts with regular keyboard input.
+hardware:
+  switch_1: F13    # Left pedal
+  switch_2: F14    # Middle pedal
+  switch_3: F15    # Right pedal
+
+# Key codes reference:
+#   F13=183, F14=184, F15=185, F16=186
+#   ENTER=28, A=30, B=48, C=46
+
+# Global settings
+debounce: 0        # Default debounce in seconds (0 = disabled)
+debug: false       # Log all key events for debugging
+
+# Mappings - how each key is handled
+# Options:
+#   key_code:    Linux input event code for the key
+#   script:      Script to run (in scripts_dir)
+#   "on":        When to trigger: press, release, or both
+#   passthrough: Whether to pass the key through to the system
+#   remap_to:    Key code to output instead (requires passthrough: true)
+#   debounce:    Per-mapping debounce override
 
 mappings:
-  pedal_a:
-    key_code: 30        # KEY_A (left pedal)
-    script: pedal_a.sh  # Script in scripts_dir
-    on: press           # press, release, or both
-    passthrough: false  # true to also send original key
+  # Left pedal - runs a script on press/release
+  pedal_left:
+    key_code: 183       # F13 (from hardware switch_1)
+    script: pedal_a.sh
+    "on": both          # Trigger on press AND release
+    passthrough: false  # Don't pass F13 to other apps
+    debounce: 1.0       # Prevent rapid triggers from partial presses
 
-  pedal_b:
-    key_code: 48        # KEY_B (middle pedal)
-    script: pedal_b.sh
-    on: press
-    passthrough: false
+  # Middle pedal - remaps to F13 and passes through
+  pedal_middle:
+    key_code: 184       # F14 (from hardware switch_2)
+    remap_to: 183       # Output as F13
+    "on": press         # Only trigger on press
+    passthrough: true   # Pass remapped key to system
+    debounce: 0
 
-  pedal_c:
-    key_code: 46        # KEY_C (right pedal)
-    script: pedal_c.sh
-    on: press
-    passthrough: false
+  # Right pedal - remaps to Enter
+  pedal_right:
+    key_code: 185       # F15 (from hardware switch_3)
+    remap_to: 28        # Output as Enter
+    "on": press
+    passthrough: true
+    debounce: 0.1       # Short debounce for typing
 
-scripts_dir: ~/.config/footpedal/scripts
+# Directory containing pedal scripts
+scripts_dir: ~/.config/pedalpusher/scripts
