@@ -182,6 +182,36 @@ pedalpusher-filter
 Applications (Hyprland, etc.)
 ```
 
+## Related Projects
+
+### Hyprvoice
+
+[Hyprvoice](https://github.com/sigreer/hyprvoice) is a voice-to-text daemon for Wayland/Hyprland that pairs naturally with PedalPusher. While PedalPusher handles the hardware input layer (foot pedals → scripts/keys), Hyprvoice handles the voice transcription layer (audio → text injection).
+
+**Typical workflow:**
+1. PedalPusher intercepts foot pedal press → triggers `hyprvoice toggle`
+2. Hyprvoice starts recording, captures the active window
+3. User speaks, releases pedal → PedalPusher triggers `hyprvoice toggle` again
+4. Hyprvoice transcribes audio via OpenAI/Groq Whisper API
+5. Hyprvoice focuses the original window and pastes the transcribed text
+
+**What each project handles:**
+| Concern | PedalPusher | Hyprvoice |
+|---------|-------------|-----------|
+| Hardware input | USB foot pedals | Microphone |
+| Event interception | Linux input events | PipeWire audio |
+| Script execution | Shell scripts on pedal events | — |
+| Key remapping | Pedal → keyboard keys | — |
+| Volume management | Reduce during recording | — |
+| Voice transcription | — | OpenAI/Groq Whisper |
+| Text injection | — | Clipboard + Ctrl+Shift+V |
+| Window tracking | — | Capture & refocus original window |
+
+The projects are independent but designed to work together. You can use:
+- PedalPusher alone for foot pedal scripting/remapping
+- Hyprvoice alone with keyboard shortcuts
+- Both together for hands-free voice input via foot pedal
+
 ## License
 
 MIT
