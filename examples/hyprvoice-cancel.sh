@@ -34,6 +34,7 @@ fi
 
 LOG="$USER_HOME/.local/state/pedalpusher/pedalpusher.log"
 SOUND_CANCEL="/usr/share/sounds/ocean/stereo/completion-fail.oga"
+VOLUME_STATE_FILE="$USER_HOME/.local/state/pedalpusher/saved_volume"
 
 # Ensure state directories exist
 mkdir -p "$(dirname "$LOG")"
@@ -53,6 +54,14 @@ EXIT_CODE=$?
 if [ $EXIT_CODE -eq 0 ]; then
     echo "ACTION: Cancelled operation" >> "$LOG"
     pw-play "$SOUND_CANCEL" 2>/dev/null &
+
+    # Restore previous volume if saved (recording was in progress)
+    if [ -f "$VOLUME_STATE_FILE" ]; then
+        SAVED_VOLUME=$(cat "$VOLUME_STATE_FILE")
+        wpctl set-volume @DEFAULT_AUDIO_SINK@ "$SAVED_VOLUME"
+        echo "VOLUME: Restored to $SAVED_VOLUME" >> "$LOG"
+        rm -f "$VOLUME_STATE_FILE"
+    fi
 else
     echo "ACTION: Cancel failed" >> "$LOG"
 fi
