@@ -83,6 +83,15 @@ KEY_CODES = {
     'NEXTSONG': 163, 'NEXT_SONG': 163,
     'PREVIOUSSONG': 165, 'PREVIOUS_SONG': 165,
     'STOPCD': 166, 'STOP': 166,
+    # Mouse buttons (EV_KEY type)
+    'BTN_LEFT': 272, 'BTN_MOUSE': 272,
+    'BTN_RIGHT': 273,
+    'BTN_MIDDLE': 274,
+    'BTN_SIDE': 275,
+    'BTN_EXTRA': 276,
+    'BTN_FORWARD': 277,
+    'BTN_BACK': 278,
+    'BTN_TASK': 279,
 }
 
 # Add KEY_ prefixed versions
@@ -391,8 +400,10 @@ def main():
                 if isinstance(remap_to, str):
                     remap_to = KEY_CODES.get(remap_to.upper(), KEY_CODES.get(remap_to, remap_to))
                 output_data = struct.pack(EVENT_FORMAT, tv_sec, tv_usec, ev_type, remap_to, ev_value)
-                if is_press or is_release:
-                    sys.stderr.write(f"pedalpusher: [{mapping_name}] remap {ev_code} -> {remap_to}\n")
+                # Log all remaps when debug is enabled, otherwise just press/release
+                if state['debug'] or is_press or is_release:
+                    val_name = {0: 'rel', 1: 'press', 2: 'repeat'}.get(ev_value, '?')
+                    sys.stderr.write(f"pedalpusher: [{mapping_name}] remap {ev_code} -> {remap_to} ({val_name})\n")
 
         if should_passthrough:
             stdout.write(output_data)

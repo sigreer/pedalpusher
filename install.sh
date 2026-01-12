@@ -39,6 +39,9 @@ CONFIG_DIR="$REAL_HOME/.config/pedalpusher"
 STATE_DIR="$REAL_HOME/.local/state/pedalpusher"
 SCRIPTS_DIR="$CONFIG_DIR/scripts"
 
+# Array for extra devices specified via --add-device
+EXTRA_DEVICES=()
+
 # ------------------------------------------------------------------------------
 # Dependency Installation
 # ------------------------------------------------------------------------------
@@ -215,32 +218,69 @@ SCRIPT_EOF
 install_udevmon_config() {
     info "Installing udevmon configuration..."
 
-    # Find foot pedal device
-    local device_link=""
-    for link in /dev/input/by-id/*FootSwitch*-event-kbd /dev/input/by-id/*foot*-event-kbd /dev/input/by-id/*pedal*-event-kbd; do
+    # Array to hold discovered devices
+    local devices=()
+    local device_names=()
+
+    # Find foot pedal devices (keyboards)
+    for link in /dev/input/by-id/*FootSwitch*-event-kbd \
+                /dev/input/by-id/*foot*-event-kbd \
+                /dev/input/by-id/*pedal*-event-kbd; do
         if [ -e "$link" ]; then
-            device_link="$link"
-            break
+            devices+=("$link")
+            device_names+=("Foot pedal")
+            break  # Only add first matching foot pedal
         fi
     done
 
-    if [ -z "$device_link" ]; then
-        warn "No foot pedal device found automatically."
-        warn "Please edit /etc/interception/udevmon.yaml with your device path."
-        warn "Find it with: ls -la /dev/input/by-id/"
-        device_link="/dev/input/by-id/usb-YOUR_DEVICE-event-kbd"
+    # Find Logitech mouse devices (for side button remapping)
+    for link in /dev/input/by-id/*Logitech*USB_Receiver*-event-mouse \
+                /dev/input/by-id/*Logitech*-event-mouse; do
+        if [ -e "$link" ]; then
+            devices+=("$link")
+            device_names+=("Logitech mouse")
+            break  # Only add first matching Logitech mouse
+        fi
+    done
+
+    # Add any devices specified via --add-device flag
+    for device in "${EXTRA_DEVICES[@]}"; do
+        if [ -e "$device" ]; then
+            devices+=("$device")
+            device_names+=("Custom device")
+        else
+            warn "Device not found: $device"
+        fi
+    done
+
+    if [ ${#devices[@]} -eq 0 ]; then
+        warn "No devices found automatically."
+        warn "Please edit /etc/interception/udevmon.yaml with your device paths."
+        warn "Find devices with: ls -la /dev/input/by-id/"
+        devices+=("/dev/input/by-id/usb-YOUR_DEVICE-event-kbd")
+        device_names+=("Placeholder")
     else
-        info "Found foot pedal: $device_link"
+        info "Found ${#devices[@]} device(s):"
+        for i in "${!devices[@]}"; do
+            info "  - ${device_names[$i]}: ${devices[$i]}"
+        done
     fi
 
+    # Generate udevmon.yaml with all devices
     sudo mkdir -p /etc/interception
-    sudo tee /etc/interception/udevmon.yaml > /dev/null << UDEVMON_EOF
-# PedalPusher - Foot pedal interception config
-# The --user flag ensures the filter uses the correct user's config and runs scripts as that user
-- JOB: intercept -g \$DEVNODE | /usr/local/bin/pedalpusher-filter --user $REAL_USER | uinput -d \$DEVNODE
-  DEVICE:
-    LINK: $device_link
-UDEVMON_EOF
+    {
+        echo "# PedalPusher - Input device interception config"
+        echo "# The --user flag ensures the filter uses the correct user's config and runs scripts as that user"
+        echo "# Devices: ${device_names[*]}"
+        echo ""
+        for i in "${!devices[@]}"; do
+            echo "# ${device_names[$i]}"
+            echo "- JOB: intercept -g \$DEVNODE | /usr/local/bin/pedalpusher-filter --user $REAL_USER | uinput -d \$DEVNODE"
+            echo "  DEVICE:"
+            echo "    LINK: ${devices[$i]}"
+            echo ""
+        done
+    } | sudo tee /etc/interception/udevmon.yaml > /dev/null
 }
 
 # ------------------------------------------------------------------------------
@@ -282,17 +322,45 @@ enable_service() {
 # ------------------------------------------------------------------------------
 
 main() {
+    # Save original args for sudo re-execution
+    local original_args=("$@")
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --add-device)
+                EXTRA_DEVICES+=("$2")
+                shift 2
+                ;;
+            --help|-h)
+                echo "Usage: $0 [OPTIONS]"
+                echo ""
+                echo "Options:"
+                echo "  --add-device PATH   Add an additional input device to intercept"
+                echo "                      Can be specified multiple times"
+                echo "  --help, -h          Show this help message"
+                echo ""
+                echo "Example:"
+                echo "  $0 --add-device /dev/input/by-id/usb-MyDevice-event-kbd"
+                exit 0
+                ;;
+            *)
+                error "Unknown option: $1"
+                ;;
+        esac
+    done
+
     echo ""
     echo "  ╔═══════════════════════════════════════╗"
     echo "  ║        PedalPusher Installer          ║"
-    echo "  ║   USB Foot Pedal → Script Mapper      ║"
+    echo "  ║   USB Input Device → Script Mapper    ║"
     echo "  ╚═══════════════════════════════════════╝"
     echo ""
 
     # Check if running with appropriate privileges
     if [ "$(id -u)" -ne 0 ]; then
         info "Re-running with sudo..."
-        exec sudo -E bash "$0" "$@"
+        exec sudo -E bash "$0" "${original_args[@]}"
     fi
 
     install_dependencies
